@@ -59,7 +59,7 @@ export default function BasicInfoSection({ profileData, onDataChange }) {
         <Text style={styles.inputLabel}>Pronouns</Text>
         <View style={styles.selectorRow}>
           <Text style={styles.selectorText}>{profileData.pronouns}</Text>
-          <Ionicons name="chevron-down" size={20} color="#666" />
+          <Ionicons name="chevron-down" size={10} color="#666" />
         </View>
       </TouchableOpacity>
       
@@ -69,7 +69,7 @@ export default function BasicInfoSection({ profileData, onDataChange }) {
           style={styles.textInput}
           value={profileData.jobTitle}
           onChangeText={(value) => onDataChange('jobTitle', value)}
-          placeholder="e.g., Software Developer, Student"
+          placeholder="e.g., Student, Dentist"
           returnKeyType="done"
         />
       </View>
@@ -80,7 +80,7 @@ export default function BasicInfoSection({ profileData, onDataChange }) {
           style={styles.textInput}
           value={profileData.school}
           onChangeText={(value) => onDataChange('school', value)}
-          placeholder="University or School"
+          placeholder=""
           returnKeyType="done"
         />
       </View>

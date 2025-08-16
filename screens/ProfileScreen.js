@@ -10,8 +10,10 @@ import {
   KeyboardAvoidingView,
   Platform
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
-import { db, auth } from '../firebase/config'; // Adjust path as needed
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { db, auth, storage } from '../firebase/config'; // Adjust path as needed
 import BasicInfoSection from './profile/BasicInfoSection';
 import PhotoUploadSection from './profile/PhotoUploadSection';
 import InterestsSection from './profile/InterestsSection';
@@ -23,6 +25,7 @@ import ProfessionalGoalsSection from './profile/ProfessionalGoalsSection';
 export default function ProfileScreen() {
   const [activeTab, setActiveTab] = useState('social');
   const [isLoading, setIsLoading] = useState(false);
+  const [user, setUser] = useState(null);
 
   // Basic Info (shared)
   const [profileData, setProfileData] = useState({
@@ -54,55 +57,216 @@ export default function ProfileScreen() {
     twitter: '',
   });
 
+  // Listen for authentication state changes
   useEffect(() => {
-    loadProfile();
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      setUser(user);
+      if (user) {
+        loadProfile(user.uid);
+      }
+    });
+    return unsubscribe;
   }, []);
 
-  const loadProfile = async () => {
-    try {
-      const userId = auth.currentUser?.uid;
-      if (!userId) return;
+  // Reload profile data when screen comes into focus
+  useFocusEffect(
+    React.useCallback(() => {
+      if (user?.uid) {
+        loadProfile(user.uid);
+      }
+    }, [user?.uid])
+  );
 
+  const loadProfile = async (userId) => {
+    if (!userId) return;
+    
+    try {
+      setIsLoading(true);
+      console.log('Loading profile for user:', userId);
+      
       const docRef = doc(db, 'profiles', userId);
       const docSnap = await getDoc(docRef);
       
       if (docSnap.exists()) {
         const data = docSnap.data();
-        setProfileData(prevData => ({ ...prevData, ...data }));
+        console.log('Loaded profile data:', data);
+        
+        // Ensure photo arrays are properly initialized
+        const updatedData = {
+          ...data,
+          socialPhotos: data.socialPhotos || [null, null, null, null, null],
+          professionalPhotos: data.professionalPhotos || [null, null, null, null, null],
+        };
+        
+        setProfileData(prevData => ({ ...prevData, ...updatedData }));
+        console.log('Profile data updated in state');
+      } else {
+        console.log('No profile found for user, starting with default data');
       }
     } catch (error) {
       console.error('Error loading profile:', error);
-    }
-  };
-
-  const saveProfile = async () => {
-    try {
-      setIsLoading(true);
-      const userId = auth.currentUser?.uid;
-      
-      if (!userId) {
-        Alert.alert('Error', 'Please log in to save your profile');
-        return;
+      // Don't show alert for offline errors, just log them
+      if (error.code !== 'failed-precondition' && error.code !== 'unavailable') {
+        Alert.alert('Error', 'Failed to load profile. Please check your connection.');
       }
-
-      await setDoc(doc(db, 'profiles', userId), {
-        ...profileData,
-        updatedAt: new Date(),
-        userId
-      });
-      
-      Alert.alert('Success', 'Profile saved successfully!');
-    } catch (error) {
-      console.error('Error saving profile:', error);
-      Alert.alert('Error', 'Failed to save profile. Please try again.');
     } finally {
       setIsLoading(false);
     }
   };
 
-  const updateProfileData = (key, value) => {
-    setProfileData(prev => ({ ...prev, [key]: value }));
+  const uploadPhotoToStorage = async (photoUri, userId, photoType, index) => {
+    try {
+      // Validate photo URI
+      if (!photoUri || typeof photoUri !== 'string') {
+        throw new Error('Invalid photo URI');
+      }
+
+      // Convert URI to blob
+      const response = await fetch(photoUri);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch image: ${response.status}`);
+      }
+      
+      const blob = await response.blob();
+      
+      // Create storage reference
+      const photoRef = ref(storage, `profiles/${userId}/${photoType}_${index}_${Date.now()}.jpg`);
+      
+      // Upload to Firebase Storage
+      const uploadResult = await uploadBytes(photoRef, blob);
+      
+      // Get download URL
+      const downloadURL = await getDownloadURL(uploadResult.ref);
+      return downloadURL;
+    } catch (error) {
+      console.error('Error uploading photo:', error);
+      throw error;
+    }
   };
+
+  // Auto-save validation function
+  const validateRequiredFields = () => {
+    if (!profileData.name.trim()) {
+      Alert.alert('Required Field', 'Please enter your name');
+      return false;
+    }
+    if (!profileData.age.trim()) {
+      Alert.alert('Required Field', 'Please enter your age');
+      return false;
+    }
+    return true;
+  };
+
+  const uploadPhotosInBackground = async (userId, photoType, photos) => {
+    // Don't await this function - let it run completely in the background
+    setTimeout(async () => {
+      try {
+        const uploadPromises = [];
+        const photoData = [...photos];
+
+        // Upload photos for the specific type
+        photos.forEach((photo, index) => {
+          if (photo && typeof photo === 'string' && (photo.startsWith('file://') || photo.startsWith('content://'))) {
+            uploadPromises.push(
+              uploadPhotoToStorage(photo, userId, photoType, index)
+                .then(url => {
+                  photoData[index] = url;
+                  console.log(`${photoType} photo ${index} uploaded successfully`);
+                })
+                .catch(error => {
+                  console.error(`Error uploading ${photoType} photo ${index}:`, error);
+                  // Keep the original URI if upload fails
+                  photoData[index] = photo;
+                })
+            );
+          }
+        });
+
+        // Wait for all photo uploads to complete (with timeout)
+        if (uploadPromises.length > 0) {
+          try {
+            await Promise.race([
+              Promise.all(uploadPromises),
+              new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Upload timeout')), 30000) // 30 second timeout
+              )
+            ]);
+            
+            // Update local state with the uploaded photo URLs
+            setProfileData(prevData => ({
+              ...prevData,
+              [photoType]: photoData
+            }));
+            
+            // Update Firestore with the uploaded photo URLs
+            const updatedData = {
+              [photoType]: photoData.filter(photo => photo !== null),
+              updatedAt: new Date()
+            };
+            
+            await setDoc(doc(db, 'profiles', userId), updatedData, { merge: true });
+            console.log(`All ${photoType} photos uploaded and profile updated`);
+          } catch (timeoutError) {
+            console.log(`${photoType} photo upload timeout or error, continuing without waiting`);
+            // Don't fail the entire process if uploads timeout
+          }
+        }
+      } catch (error) {
+        console.error(`Error uploading ${photoType} photos in background:`, error);
+        // Don't show alerts for background upload errors
+      }
+    }, 100); // Small delay to ensure save completes first
+  };
+
+  const updateProfileData = async (key, value) => {
+    console.log(`Updating ${key}:`, value);
+    // Update local state immediately
+    setProfileData(prev => ({ ...prev, [key]: value }));
+    
+    // Auto-save to Firebase
+    await autoSaveToFirebase(key, value);
+  };
+
+  const autoSaveToFirebase = async (key, value) => {
+    try {
+      const userId = user?.uid;
+      if (!userId) {
+        console.log('No user ID available for saving');
+        return;
+      }
+
+      // Create update object with just the changed field
+      const updateData = {
+        [key]: value,
+        updatedAt: new Date()
+      };
+
+      // Special handling for photo arrays
+      if (key === 'socialPhotos' || key === 'professionalPhotos') {
+        // Filter out null photos
+        updateData[key] = value.filter(photo => photo !== null);
+        
+        // Check if there are new photos to upload
+        const hasNewPhotos = value.some(photo => 
+          photo && typeof photo === 'string' && (photo.startsWith('file://') || photo.startsWith('content://'))
+        );
+
+        if (hasNewPhotos) {
+          // Upload photos in background
+          uploadPhotosInBackground(userId, key, value);
+        }
+      }
+
+      // Save to Firestore
+      await setDoc(doc(db, 'profiles', userId), updateData, { merge: true });
+      console.log(`Auto-saved ${key}:`, value);
+    } catch (error) {
+      console.error(`Error auto-saving ${key}:`, error);
+      // Don't show alerts for auto-save errors to avoid spam
+    }
+  };
+
+
 
   const SocialTabContent = () => (
     <>
@@ -159,12 +323,17 @@ export default function ProfileScreen() {
       style={styles.container} 
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
-        {/* Basic Info Section - Always on top */}
-        <BasicInfoSection
-          profileData={profileData}
-          onDataChange={updateProfileData}
-        />
+      {isLoading ? (
+        <View style={styles.loadingContainer}>
+          <Text style={styles.loadingText}>Loading profile...</Text>
+        </View>
+      ) : (
+        <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
+          {/* Basic Info Section - Always on top */}
+          <BasicInfoSection
+            profileData={profileData}
+            onDataChange={updateProfileData}
+          />
 
         {/* Tab Navigation */}
         <View style={styles.tabContainer}>
@@ -199,19 +368,16 @@ export default function ProfileScreen() {
           onTwitterChange={(value) => updateProfileData('twitter', value)}
         />
 
-        {/* Save Button */}
-        <TouchableOpacity 
-          style={[styles.saveButton, isLoading && styles.saveButtonDisabled]}
-          onPress={saveProfile}
-          disabled={isLoading}
-        >
-          <Text style={styles.saveButtonText}>
-            {isLoading ? 'Saving...' : 'Save Profile'}
+        {/* Auto-save status indicator */}
+        <View style={styles.autoSaveIndicator}>
+          <Text style={styles.autoSaveText}>
+            ✓ Auto-saving enabled
           </Text>
-        </TouchableOpacity>
+        </View>
 
         <View style={styles.bottomPadding} />
-      </ScrollView>
+        </ScrollView>
+      )}
     </KeyboardAvoidingView>
   );
 }
@@ -220,6 +386,17 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f8f9fa',
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#f8f9fa',
+  },
+  loadingText: {
+    fontSize: 16,
+    color: '#666',
+    fontWeight: '500',
   },
   scrollContainer: {
     flex: 1,
@@ -254,20 +431,19 @@ const styles = StyleSheet.create({
   activeTabText: {
     color: 'white',
   },
-  saveButton: {
-    backgroundColor: '#007AFF',
+  autoSaveIndicator: {
+    backgroundColor: '#e8f5e8',
     marginHorizontal: 16,
-    paddingVertical: 16,
+    paddingVertical: 12,
     borderRadius: 12,
     alignItems: 'center',
     marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#4caf50',
   },
-  saveButtonDisabled: {
-    backgroundColor: '#ccc',
-  },
-  saveButtonText: {
-    color: 'white',
-    fontSize: 18,
+  autoSaveText: {
+    color: '#2e7d32',
+    fontSize: 14,
     fontWeight: '600',
   },
   bottomPadding: {

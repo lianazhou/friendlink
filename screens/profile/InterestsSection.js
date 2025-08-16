@@ -3,8 +3,9 @@ import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
-const INTEREST_OPTIONS = ['Coffee', 'Hiking', 'Photography', 'Travel', 'Music', 'Art'];
-const HOBBY_OPTIONS = ['Reading', 'Gaming', 'Cooking', 'Gardening', 'Painting', 'Writing'];
+const INTEREST_OPTIONS = [''];
+const HOBBY_OPTIONS = ['Photography', 'Travel', 'Music', 'Art', 'Reading', 'Gaming', 'Cooking', 'Writing'];
+
 
 export default function InterestsSection({ 
   interests, 
